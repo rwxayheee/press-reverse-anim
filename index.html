@@ -5,25 +5,29 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Press → Forward, Release → Reverse</title>
   <style>
-    body { margin: 0; display: grid; place-items: center; height: 100vh; background: transparent; }
-    .wrap { width: min(360px, 90vw); }
+    html, body { margin: 0; height: 100%; background: transparent; }
+    body { display: grid; place-items: center; }
+
+    .wrap { width: min(360px, 90vw); background: transparent; }
     .hint { font: 14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; opacity: 0.7; margin-top: 8px; text-align: center; }
-    video { width: 100%; height: auto; display: block; border-radius: 16px; }
+
+    /* IMPORTANT: prevent white flash */
+    video {
+      width: 100%;
+      height: auto;
+      display: block;
+      border-radius: 16px;
+      background: transparent;   /* key */
+    }
   </style>
 </head>
 <body>
   <div class="wrap">
-    <video id="v"
-      muted
-      playsinline
-      preload="metadata"
-      poster=""
-    ></video>
+    <video id="v" muted playsinline preload="auto"></video>
     <div class="hint">Press / hold to play → release to rewind</div>
   </div>
 
   <script>
-    // Add your 5–10 animation pairs here
     const ANIMS = [
       { fwd: "assets/anim1_fwd.mp4", rev: "assets/anim1_rev.mp4" },
       // { fwd: "assets/anim2_fwd.mp4", rev: "assets/anim2_rev.mp4" },
@@ -31,9 +35,14 @@
 
     const video = document.getElementById("v");
 
-    let current = null;          // current anim pair
-    let duration = null;         // seconds
-    let holding = false;
+    let current = null;
+    let duration = null;
+
+    // Keep reverse preloaded so release doesn't "load" -> no blink
+    const revPreload = document.createElement("video");
+    revPreload.muted = true;
+    revPreload.playsInline = true;
+    revPreload.preload = "auto";
 
     function pickRandomAnim() {
       return ANIMS[Math.floor(Math.random() * ANIMS.length)];
@@ -43,72 +52,87 @@
       return new Promise(res => el.addEventListener(name, res, { once: true }));
     }
 
-    async function loadSrc(src) {
-      video.src = src;
-      // Force load
-      video.load();
-      // Wait metadata so duration is known
-      await waitEvent(video, "loadedmetadata");
-      duration = video.duration;
+    async function loadMeta(el, src) {
+      el.src = src;
+      el.load();
+      await waitEvent(el, "loadedmetadata");
+      return el.duration;
+    }
+
+    async function prepareAnimPair(anim) {
+      // Load metadata for both in parallel
+      const [durF] = await Promise.all([
+        loadMeta(video, anim.fwd),
+        loadMeta(revPreload, anim.rev),
+      ]);
+      duration = durF;
+      current = anim;
+
+      // Park both at start; video is the visible one
+      video.currentTime = 0;
+      video.pause();
+
+      // Force first frame decode (reduces initial flicker on some browsers)
+      try { await video.play(); } catch {}
+      video.pause();
+      video.currentTime = 0;
     }
 
     async function playForwardFromStart() {
-      current = pickRandomAnim();
-      await loadSrc(current.fwd);
+      const anim = pickRandomAnim();
+      await prepareAnimPair(anim);
+
       video.currentTime = 0;
-      // play() must be triggered from a user gesture; pointerdown counts.
-      await video.play();
+      await video.play(); // user gesture (pointerdown) -> allowed
     }
 
-    async function swapToReverseAtMirroredTime() {
+    async function playReverseFromMirroredTime() {
       if (!current || !duration) return;
+
       const t = Math.min(Math.max(video.currentTime, 0), duration);
       const mirrored = Math.max(0, Math.min(duration, duration - t));
 
-      await loadSrc(current.rev);
-
-      // Seek after metadata is ready. Some browsers need a microtask tick.
+      // Swap to the already-preloaded reverse source (instant)
+      video.src = revPreload.src;
+      video.load();
+      await waitEvent(video, "loadedmetadata"); // very fast; metadata is cached
       video.currentTime = mirrored;
+
       try { await video.play(); } catch {}
     }
 
-    // Pointer events cover mouse + touch + pen
+    let holding = false;
     const target = document.body;
 
     target.addEventListener("pointerdown", async (e) => {
       e.preventDefault();
       holding = true;
-      // Pick a random animation each interaction
       await playForwardFromStart();
     });
 
     target.addEventListener("pointerup", async (e) => {
       e.preventDefault();
       holding = false;
-      await swapToReverseAtMirroredTime();
+      await playReverseFromMirroredTime();
     });
 
     target.addEventListener("pointercancel", async () => {
       holding = false;
-      await swapToReverseAtMirroredTime();
+      await playReverseFromMirroredTime();
     });
 
-    // Optional: if user drags pointer out while holding, still reverse
     target.addEventListener("pointerleave", async (e) => {
       if (holding && e.buttons) {
         holding = false;
-        await swapToReverseAtMirroredTime();
+        await playReverseFromMirroredTime();
       }
     });
 
-    // Initial idle state (optional): load first anim frame without playing
+    // Idle preload so first press is snappy
     (async () => {
-      current = pickRandomAnim();
-      await loadSrc(current.fwd);
-      video.currentTime = 0;
-      video.pause();
+      const anim = pickRandomAnim();
+      await prepareAnimPair(anim);
     })();
   </script>
 </body>
 </html>
-
