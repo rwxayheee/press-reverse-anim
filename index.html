@@ -6,217 +6,141 @@
   <title>Press → Forward, Release → Reverse</title>
   <style>
     html, body { margin: 0; height: 100%; background: transparent; }
-    body { display: grid; place-items: center; }
-
+    body { display: grid; place-items: center; height: 100vh; background: transparent; }
     .wrap { width: min(360px, 90vw); }
-    .stage {
-      position: relative;
-      border-radius: 16px;
-      overflow: hidden;
-      background: #000;           /* fallback is black (no white flash) */
-      touch-action: manipulation;
-      user-select: none;
-      -webkit-tap-highlight-color: transparent;
-    }
-
-    /* Invisible sizer establishes aspect/height reliably */
-    #sizer {
-      position: relative;
-      opacity: 0;
-      pointer-events: none;
-      width: 100%;
-      height: auto;
-      display: block;
-    }
-
-    /* Two stacked playback videos. They do NOT receive pointer events. */
-    #vF, #vR {
-      position: absolute;
-      inset: 0;
-      width: 100%;
-      height: 100%;
-      object-fit: contain;
-      opacity: 0;
-      pointer-events: none;
-      background: #000;
-    }
-    #vF.is-on, #vR.is-on { opacity: 1; }
-
-    .hint {
-      font: 14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-      opacity: 0.7;
-      margin-top: 8px;
-      text-align: center;
-    }
+    .stage { border-radius: 16px; overflow: hidden; background: #000; } /* black fallback */
+    .hint { font: 14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; opacity: 0.7; margin-top: 8px; text-align: center; }
+    video { width: 100%; height: auto; display: block; background: #000; }
   </style>
 </head>
 <body>
   <div class="wrap">
-    <div class="stage" id="stage" aria-label="Press and hold">
-      <video id="sizer" muted playsinline preload="metadata"></video>
-      <video id="vF" muted playsinline preload="auto"></video>
-      <video id="vR" muted playsinline preload="auto"></video>
+    <div class="stage">
+      <video id="v"
+        muted
+        playsinline
+        preload="auto"
+      ></video>
     </div>
     <div class="hint">Press / hold to play → release to rewind</div>
   </div>
 
   <script>
-    // Put 5–10 animation pairs here
+    // Add your 5–10 animation pairs here
     const ANIMS = [
       { fwd: "assets/anim1_fwd.mp4", rev: "assets/anim1_rev.mp4" },
       // { fwd: "assets/anim2_fwd.mp4", rev: "assets/anim2_rev.mp4" },
     ];
 
-    const stage = document.getElementById("stage");
-    const sizer = document.getElementById("sizer");
-    const vF = document.getElementById("vF");
-    const vR = document.getElementById("vR");
+    const video = document.getElementById("v");
 
-    let duration = 0;
+    // Cache of preloaded blob URLs: Map(src -> objectURL)
+    const blobURL = new Map();
+
+    let current = null;          // current anim pair
+    let duration = 0;            // seconds
     let holding = false;
-    let prepared = false;
-    let preparing = false;
-    let currentPair = null;
 
     function pickRandomAnim() {
       return ANIMS[Math.floor(Math.random() * ANIMS.length)];
     }
 
-    function once(el, evt) {
-      return new Promise(res => el.addEventListener(evt, res, { once: true }));
+    function once(el, name) {
+      return new Promise(res => el.addEventListener(name, res, { once: true }));
     }
 
-    async function ensurePaintableFrame(el) {
-      // Wait for something likely paintable
-      await Promise.race([once(el, "canplay"), once(el, "seeked")]).catch(() => {});
+    async function ensurePaintedFrame(el) {
+      // Wait for a frame to be ready so we don't see a "blank" paint
       if (typeof el.requestVideoFrameCallback === "function") {
         await new Promise(res => el.requestVideoFrameCallback(() => res()));
       } else {
+        // Fallback: a short delay usually avoids the flash
         await new Promise(r => setTimeout(r, 20));
       }
     }
 
-    function show(which) {
-      vF.classList.toggle("is-on", which === "F");
-      vR.classList.toggle("is-on", which === "R");
+    async function preloadToBlob(src) {
+      if (blobURL.has(src)) return blobURL.get(src);
+
+      const resp = await fetch(src, { cache: "force-cache" });
+      if (!resp.ok) throw new Error("Failed to fetch " + src);
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      blobURL.set(src, url);
+      return url;
     }
 
-    async function prepareNextPair(pair) {
-      if (preparing) return;
-      preparing = true;
-      prepared = false;
+    async function setVideoSrcFromCache(src) {
+      const url = await preloadToBlob(src);
+      video.src = url;
+      video.load();
+      await once(video, "loadedmetadata");
+      duration = video.duration || 0;
+      await ensurePaintedFrame(video);
+    }
 
-      currentPair = pair;
-
-      // Set sources (do NOT do this during the press; do it while idle)
-      vF.src = pair.fwd;
-      vR.src = pair.rev;
-      sizer.src = pair.fwd;
-
-      vF.load(); vR.load(); sizer.load();
-
-      await once(vF, "loadedmetadata");
-      duration = vF.duration || 0;
-
-      // Prime both at frame 0
-      vF.currentTime = 0;
-      vR.currentTime = 0;
-
-      // Stabilize layout + decoding
-      await ensurePaintableFrame(sizer);
-      await ensurePaintableFrame(vF);
-      await ensurePaintableFrame(vR);
-
-      // Idle state: show nothing (black background) until pressed
-      show(null);
-
-      prepared = true;
-      preparing = false;
+    async function preparePair(pair) {
+      // Preload both directions up front so swapping is instant and doesn't flash
+      await Promise.all([preloadToBlob(pair.fwd), preloadToBlob(pair.rev)]);
     }
 
     async function playForwardFromStart() {
-      if (!prepared) return;           // if something is still loading, ignore
-      vR.pause();
-      vF.pause();
-      vF.currentTime = 0;
+      current = pickRandomAnim();
+      await preparePair(current);
 
-      show("F");
-      await ensurePaintableFrame(vF);
-
-      // Must be called from a user gesture; pointerdown qualifies
-      await vF.play();
+      await setVideoSrcFromCache(current.fwd);
+      video.currentTime = 0;
+      // play() must be triggered from a user gesture; pointerdown counts.
+      await video.play();
     }
 
-    async function playReverseFromMirroredTime() {
-      if (!prepared || !duration) return;
+    async function swapToReverseAtMirroredTime() {
+      if (!current || !duration) return;
 
-      const t = Math.min(Math.max(vF.currentTime || 0, 0), duration);
+      const t = Math.min(Math.max(video.currentTime || 0, 0), duration);
       const mirrored = Math.max(0, Math.min(duration, duration - t));
 
-      vF.pause();
-      vR.pause();
-
-      vR.currentTime = mirrored;
-      await once(vR, "seeked").catch(() => {});
-      show("R");
-      await ensurePaintableFrame(vR);
-
-      try { await vR.play(); } catch {}
+      await setVideoSrcFromCache(current.rev);
+      video.currentTime = mirrored;
+      await once(video, "seeked").catch(() => {});
+      try { await video.play(); } catch {}
     }
 
-    // When reverse finishes rewinding to 0, hide + prep the next random pair
-    function armNextOnReverseEnd() {
-      const eps = 0.04; // seconds
-      const handler = async () => {
-        if (!holding && vR.currentTime <= eps) {
-          vR.pause();
-          show(null);
-          vR.removeEventListener("timeupdate", handler);
+    // Pointer events cover mouse + touch + pen
+    const target = document.querySelector(".stage");
 
-          // Prepare the next random animation while idle (so next press is instant)
-          await prepareNextPair(pickRandomAnim());
-        }
-      };
-      vR.addEventListener("timeupdate", handler);
-    }
-
-    // Prevent any click/tap default behavior from the browser
-    stage.addEventListener("click", (e) => e.preventDefault());
-
-    stage.addEventListener("pointerdown", async (e) => {
+    target.addEventListener("pointerdown", async (e) => {
       e.preventDefault();
       holding = true;
-      stage.setPointerCapture?.(e.pointerId);
-
-      // IMPORTANT: do NOT swap sources here. Just play what is already prepared.
+      target.setPointerCapture?.(e.pointerId);
       await playForwardFromStart();
     });
 
-    stage.addEventListener("pointerup", async (e) => {
+    target.addEventListener("pointerup", async (e) => {
       e.preventDefault();
       holding = false;
-
-      await playReverseFromMirroredTime();
-      armNextOnReverseEnd();
+      await swapToReverseAtMirroredTime();
     });
 
-    stage.addEventListener("pointercancel", async () => {
+    target.addEventListener("pointercancel", async () => {
       holding = false;
-      await playReverseFromMirroredTime();
-      armNextOnReverseEnd();
+      await swapToReverseAtMirroredTime();
     });
 
-    stage.addEventListener("pointerleave", async (e) => {
+    target.addEventListener("pointerleave", async (e) => {
       if (holding && e.buttons) {
         holding = false;
-        await playReverseFromMirroredTime();
-        armNextOnReverseEnd();
+        await swapToReverseAtMirroredTime();
       }
     });
 
-    // Initial preload: pick one random pair and make it ready before first press
+    // Idle preload (optional): preload first pair so first press is snappy
     (async () => {
-      await prepareNextPair(pickRandomAnim());
+      current = pickRandomAnim();
+      await preparePair(current);
+      await setVideoSrcFromCache(current.fwd);
+      video.currentTime = 0;
+      video.pause();
     })();
   </script>
 </body>
