@@ -8,140 +8,163 @@
     html, body { margin: 0; height: 100%; background: transparent; }
     body { display: grid; place-items: center; height: 100vh; background: transparent; }
     .wrap { width: min(360px, 90vw); }
-    .stage { border-radius: 16px; overflow: hidden; background: #000; } /* black fallback */
+    .stage { border-radius: 16px; overflow: hidden; background: #000; touch-action: manipulation; user-select: none; }
     .hint { font: 14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; opacity: 0.7; margin-top: 8px; text-align: center; }
     video { width: 100%; height: auto; display: block; background: #000; }
+    .status { font: 12px/1.3 system-ui; opacity: 0.7; text-align:center; margin-top: 6px; }
   </style>
 </head>
 <body>
   <div class="wrap">
-    <div class="stage">
-      <video id="v"
-        muted
-        playsinline
-        preload="auto"
-      ></video>
+    <div class="stage" id="stage">
+      <video id="v" muted playsinline preload="auto"></video>
     </div>
     <div class="hint">Press / hold to play → release to rewind</div>
+    <div class="status" id="status">Loading…</div>
   </div>
 
   <script>
-    // Add your 5–10 animation pairs here
     const ANIMS = [
       { fwd: "assets/anim1_fwd.mp4", rev: "assets/anim1_rev.mp4" },
       // { fwd: "assets/anim2_fwd.mp4", rev: "assets/anim2_rev.mp4" },
     ];
 
-    const video = document.getElementById("v");
+    const stage = document.getElementById("stage");
+    const video  = document.getElementById("v");
+    const status = document.getElementById("status");
 
-    // Cache of preloaded blob URLs: Map(src -> objectURL)
-    const blobURL = new Map();
+    // Cache: src -> { url: blobObjectUrl, duration }
+    const cache = new Map();
 
-    let current = null;          // current anim pair
-    let duration = 0;            // seconds
+    let ready = false;
     let holding = false;
+    let current = null;      // {fwd, rev}
+    let duration = 0;
 
     function pickRandomAnim() {
       return ANIMS[Math.floor(Math.random() * ANIMS.length)];
     }
 
-    function once(el, name) {
-      return new Promise(res => el.addEventListener(name, res, { once: true }));
+    function once(el, evt) {
+      return new Promise(res => el.addEventListener(evt, res, { once: true }));
     }
 
-    async function ensurePaintedFrame(el) {
-      // Wait for a frame to be ready so we don't see a "blank" paint
-      if (typeof el.requestVideoFrameCallback === "function") {
-        await new Promise(res => el.requestVideoFrameCallback(() => res()));
-      } else {
-        // Fallback: a short delay usually avoids the flash
-        await new Promise(r => setTimeout(r, 20));
-      }
-    }
-
-    async function preloadToBlob(src) {
-      if (blobURL.has(src)) return blobURL.get(src);
+    async function preloadOne(src) {
+      if (cache.has(src)) return cache.get(src);
 
       const resp = await fetch(src, { cache: "force-cache" });
       if (!resp.ok) throw new Error("Failed to fetch " + src);
       const blob = await resp.blob();
       const url = URL.createObjectURL(blob);
-      blobURL.set(src, url);
-      return url;
+
+      // Get duration using a hidden video element (NOT during user gesture)
+      const probe = document.createElement("video");
+      probe.muted = true;
+      probe.playsInline = true;
+      probe.preload = "auto";
+      probe.src = url;
+      probe.load();
+      await once(probe, "loadedmetadata");
+      const dur = probe.duration || 0;
+
+      const entry = { url, duration: dur };
+      cache.set(src, entry);
+      return entry;
     }
 
-    async function setVideoSrcFromCache(src) {
-      const url = await preloadToBlob(src);
-      video.src = url;
+    async function preloadAll() {
+      status.textContent = "Loading…";
+      const allSrcs = [];
+      for (const a of ANIMS) allSrcs.push(a.fwd, a.rev);
+
+      // Preload sequentially to be gentler; change to Promise.all if you want
+      for (let i = 0; i < allSrcs.length; i++) {
+        await preloadOne(allSrcs[i]);
+        status.textContent = `Loading… ${i+1}/${allSrcs.length}`;
+      }
+
+      ready = true;
+      status.textContent = "Ready ✅ (press to play)";
+    }
+
+    // ----- Interaction (NO awaits before play) -----
+
+    function setSrcSync(srcEntry) {
+      video.src = srcEntry.url;
       video.load();
-      await once(video, "loadedmetadata");
-      duration = video.duration || 0;
-      await ensurePaintedFrame(video);
     }
 
-    async function preparePair(pair) {
-      // Preload both directions up front so swapping is instant and doesn't flash
-      await Promise.all([preloadToBlob(pair.fwd), preloadToBlob(pair.rev)]);
-    }
-
-    async function playForwardFromStart() {
+    function playForwardFromStart() {
       current = pickRandomAnim();
-      await preparePair(current);
 
-      await setVideoSrcFromCache(current.fwd);
-      video.currentTime = 0;
-      // play() must be triggered from a user gesture; pointerdown counts.
-      await video.play();
+      const fwd = cache.get(current.fwd);
+      const rev = cache.get(current.rev);
+
+      if (!fwd || !rev) return; // not ready yet
+
+      duration = fwd.duration;
+
+      setSrcSync(fwd);
+      // currentTime can be set immediately; browser will clamp once metadata lands
+      try { video.currentTime = 0; } catch {}
+      // Call play immediately inside gesture
+      video.play().catch(() => {});
     }
 
-    async function swapToReverseAtMirroredTime() {
-      if (!current || !duration) return;
+    function swapToReverseAtMirroredTime() {
+      if (!current) return;
 
-      const t = Math.min(Math.max(video.currentTime || 0, 0), duration);
-      const mirrored = Math.max(0, Math.min(duration, duration - t));
+      const fwd = cache.get(current.fwd);
+      const rev = cache.get(current.rev);
+      if (!fwd || !rev) return;
 
-      await setVideoSrcFromCache(current.rev);
-      video.currentTime = mirrored;
-      await once(video, "seeked").catch(() => {});
-      try { await video.play(); } catch {}
+      const t = Math.min(Math.max(video.currentTime || 0, 0), duration || fwd.duration || 0);
+      const mirrored = Math.max(0, (duration || fwd.duration || 0) - t);
+
+      setSrcSync(rev);
+      // Seek AFTER metadata is ready, but we do it via an event handler (no await)
+      video.addEventListener("loadedmetadata", () => {
+        try { video.currentTime = mirrored; } catch {}
+        video.play().catch(() => {});
+      }, { once: true });
     }
 
-    // Pointer events cover mouse + touch + pen
-    const target = document.querySelector(".stage");
-
-    target.addEventListener("pointerdown", async (e) => {
+    // Pointer events
+    stage.addEventListener("pointerdown", (e) => {
       e.preventDefault();
       holding = true;
-      target.setPointerCapture?.(e.pointerId);
-      await playForwardFromStart();
+      stage.setPointerCapture?.(e.pointerId);
+
+      if (!ready) return;
+      playForwardFromStart();
     });
 
-    target.addEventListener("pointerup", async (e) => {
+    stage.addEventListener("pointerup", (e) => {
       e.preventDefault();
       holding = false;
-      await swapToReverseAtMirroredTime();
+      if (!ready) return;
+      swapToReverseAtMirroredTime();
     });
 
-    target.addEventListener("pointercancel", async () => {
+    stage.addEventListener("pointercancel", () => {
       holding = false;
-      await swapToReverseAtMirroredTime();
+      if (!ready) return;
+      swapToReverseAtMirroredTime();
     });
 
-    target.addEventListener("pointerleave", async (e) => {
+    stage.addEventListener("pointerleave", (e) => {
       if (holding && e.buttons) {
         holding = false;
-        await swapToReverseAtMirroredTime();
+        if (!ready) return;
+        swapToReverseAtMirroredTime();
       }
     });
 
-    // Idle preload (optional): preload first pair so first press is snappy
-    (async () => {
-      current = pickRandomAnim();
-      await preparePair(current);
-      await setVideoSrcFromCache(current.fwd);
-      video.currentTime = 0;
-      video.pause();
-    })();
+    // Kick off preload at startup
+    preloadAll().catch(err => {
+      console.error(err);
+      status.textContent = "Failed to load assets (check paths).";
+    });
   </script>
 </body>
 </html>
