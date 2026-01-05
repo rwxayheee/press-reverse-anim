@@ -13,13 +13,20 @@
 
     /* Make sure any fallback paint is NOT white */
     .stage { background: #000; border-radius: 16px; overflow: hidden; }
-    video, canvas { background: #000; display: block; }
+    video, canvas {
+      width: 100%;
+      height: auto;
+      background: #000;
+      display: block;
+    }
 
     /* Canvas overlay sits above video */
     #freeze {
       position: absolute;
       inset: 0;
       z-index: 2;
+      width: 100%;
+      height: 100%;
     }
     #v {
       position: relative;
@@ -71,12 +78,15 @@
     }
 
     function setFreezeSize() {
-      // Match canvas pixel size to displayed video size for crispness
-      const rect = video.getBoundingClientRect();
+      // Match canvas pixel size to displayed STAGE size for crispness (more stable than video rect during src swaps)
+      const stage = document.querySelector(".stage");
+      const rect = stage.getBoundingClientRect();
       const dpr = window.devicePixelRatio || 1;
       freeze.width = Math.max(1, Math.round(rect.width * dpr));
       freeze.height = Math.max(1, Math.round(rect.height * dpr));
     }
+
+    window.addEventListener("resize", () => drawFreezeFrame());
 
     function drawFreezeFrame() {
       setFreezeSize();
