@@ -12,14 +12,8 @@
     .stage { position: relative; border-radius: 16px; overflow: hidden; }
 
     /* Make sure any fallback paint is NOT white */
-    .stage { background: rgba(0,0,0,0); }
-
-    video, canvas {
-      width: 100%;
-      height: auto;
-      display: block;
-      background: rgba(0,0,0,0); /* avoid white flash */
-    }
+    .stage { background: #000; border-radius: 16px; overflow: hidden; }
+    video, canvas { background: #000; display: block; }
 
     /* Canvas overlay sits above video */
     #freeze {
@@ -43,7 +37,7 @@
 <body>
   <div class="wrap">
     <div class="stage">
-      <video id="v" muted playsinline preload="auto"></video>
+      <video id="v" muted playsinline preload="auto" poster="assets/black.png"></video>
       <canvas id="freeze"></canvas>
     </div>
     <div class="hint">Press / hold to play → release to rewind</div>
