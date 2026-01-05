@@ -8,9 +8,31 @@
     html, body { margin: 0; height: 100%; background: transparent; }
     body { display: grid; place-items: center; height: 100vh; background: transparent; }
     .wrap { width: min(360px, 90vw); }
-    .stage { border-radius: 16px; overflow: hidden; background: #000; touch-action: manipulation; user-select: none; }
+
+    /* Lock the player box size so src swaps don't reflow (fixes the "black reset blink") */
+    .stage {
+      position: relative;
+      width: 100%;
+      border-radius: 16px;
+      overflow: hidden;
+      background: #000;
+      touch-action: manipulation;
+      user-select: none;
+      /* default aspect ratio until we know the real one */
+      aspect-ratio: var(--ar, 16 / 9);
+    }
+    /* Make the video fill the locked stage box */
+    video {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: block;
+      background: #000;
+    }
+
     .hint { font: 14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; opacity: 0.7; margin-top: 8px; text-align: center; }
-    video { width: 100%; height: auto; display: block; background: #000; }
     .status { font: 12px/1.3 system-ui; opacity: 0.7; text-align:center; margin-top: 6px; }
   </style>
 </head>
@@ -33,7 +55,7 @@
     const video  = document.getElementById("v");
     const status = document.getElementById("status");
 
-    // Cache: src -> { url: blobObjectUrl, duration }
+    // Cache: src -> { url: blobObjectUrl, duration, w, h }
     const cache = new Map();
 
     let ready = false;
@@ -49,6 +71,13 @@
       return new Promise(res => el.addEventListener(evt, res, { once: true }));
     }
 
+    function setStageAspect(w, h) {
+      // Guard against 0 values
+      const W = (w && w > 0) ? w : 16;
+      const H = (h && h > 0) ? h : 9;
+      stage.style.setProperty("--ar", `${W} / ${H}`);
+    }
+
     async function preloadOne(src) {
       if (cache.has(src)) return cache.get(src);
 
@@ -57,7 +86,7 @@
       const blob = await resp.blob();
       const url = URL.createObjectURL(blob);
 
-      // Get duration using a hidden video element (NOT during user gesture)
+      // Probe metadata off-gesture
       const probe = document.createElement("video");
       probe.muted = true;
       probe.playsInline = true;
@@ -65,9 +94,12 @@
       probe.src = url;
       probe.load();
       await once(probe, "loadedmetadata");
-      const dur = probe.duration || 0;
 
-      const entry = { url, duration: dur };
+      const dur = probe.duration || 0;
+      const w = probe.videoWidth || 0;
+      const h = probe.videoHeight || 0;
+
+      const entry = { url, duration: dur, w, h };
       cache.set(src, entry);
       return entry;
     }
@@ -77,11 +109,15 @@
       const allSrcs = [];
       for (const a of ANIMS) allSrcs.push(a.fwd, a.rev);
 
-      // Preload sequentially to be gentler; change to Promise.all if you want
       for (let i = 0; i < allSrcs.length; i++) {
         await preloadOne(allSrcs[i]);
         status.textContent = `Loading… ${i+1}/${allSrcs.length}`;
       }
+
+      // Set a stable aspect ratio from the first animation's forward video
+      const first = ANIMS[0];
+      const firstEntry = first ? cache.get(first.fwd) : null;
+      if (firstEntry) setStageAspect(firstEntry.w, firstEntry.h);
 
       ready = true;
       status.textContent = "Ready ✅ (press to play)";
@@ -100,14 +136,15 @@
       const fwd = cache.get(current.fwd);
       const rev = cache.get(current.rev);
 
-      if (!fwd || !rev) return; // not ready yet
+      if (!fwd || !rev) return;
 
       duration = fwd.duration;
 
+      // Lock aspect ratio BEFORE swapping src to prevent any reflow blink
+      setStageAspect(fwd.w, fwd.h);
+
       setSrcSync(fwd);
-      // currentTime can be set immediately; browser will clamp once metadata lands
       try { video.currentTime = 0; } catch {}
-      // Call play immediately inside gesture
       video.play().catch(() => {});
     }
 
@@ -118,11 +155,15 @@
       const rev = cache.get(current.rev);
       if (!fwd || !rev) return;
 
-      const t = Math.min(Math.max(video.currentTime || 0, 0), duration || fwd.duration || 0);
-      const mirrored = Math.max(0, (duration || fwd.duration || 0) - t);
+      const dur = duration || fwd.duration || 0;
+      const t = Math.min(Math.max(video.currentTime || 0, 0), dur);
+      const mirrored = Math.max(0, dur - t);
+
+      // Keep aspect stable (rev should match, but this is safe)
+      setStageAspect(rev.w || fwd.w, rev.h || fwd.h);
 
       setSrcSync(rev);
-      // Seek AFTER metadata is ready, but we do it via an event handler (no await)
+
       video.addEventListener("loadedmetadata", () => {
         try { video.currentTime = mirrored; } catch {}
         video.play().catch(() => {});
@@ -160,7 +201,6 @@
       }
     });
 
-    // Kick off preload at startup
     preloadAll().catch(err => {
       console.error(err);
       status.textContent = "Failed to load assets (check paths).";
