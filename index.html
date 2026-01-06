@@ -50,6 +50,7 @@
       { fwd: "assets/anim1_fwd.mp4", rev: "assets/anim1_rev.mp4" },
       // { fwd: "assets/anim2_fwd.mp4", rev: "assets/anim2_rev.mp4" },
     ];
+    const IDLE = "assets/anim1.mp4";
 
     const stage = document.getElementById("stage");
     const video  = document.getElementById("v");
@@ -106,6 +107,11 @@
 
     async function preloadAll() {
       status.textContent = "Loading…";
+      // Preload idle first and start it immediately
+      const idleEntry = await preloadOne(IDLE);
+      setStageAspect(idleEntry.w, idleEntry.h);
+      playIdleFromStart();
+
       const allSrcs = [];
       for (const a of ANIMS) allSrcs.push(a.fwd, a.rev);
 
@@ -113,11 +119,6 @@
         await preloadOne(allSrcs[i]);
         status.textContent = `Loading… ${i+1}/${allSrcs.length}`;
       }
-
-      // Set a stable aspect ratio from the first animation's forward video
-      const first = ANIMS[0];
-      const firstEntry = first ? cache.get(first.fwd) : null;
-      if (firstEntry) setStageAspect(firstEntry.w, firstEntry.h);
 
       ready = true;
       status.textContent = "Ready ✅ (press to play)";
@@ -128,6 +129,17 @@
     function setSrcSync(srcEntry) {
       video.src = srcEntry.url;
       video.load();
+    }
+
+    function playIdleFromStart() {
+      const idle = cache.get(IDLE);
+      if (!idle) return;
+      setStageAspect(idle.w, idle.h);
+      video.loop = true;
+      video.onended = null;
+      setSrcSync(idle);
+      try { video.currentTime = 0; } catch {}
+      video.play().catch(() => {});
     }
 
     function playForwardFromStart() {
@@ -144,6 +156,8 @@
       setStageAspect(fwd.w, fwd.h);
 
       setSrcSync(fwd);
+      video.loop = false;
+      video.onended = null;
       try { video.currentTime = 0; } catch {}
       video.play().catch(() => {});
     }
@@ -165,6 +179,8 @@
       setSrcSync(rev);
 
       video.addEventListener("loadedmetadata", () => {
+        video.loop = false;
+        video.onended = () => { playIdleFromStart(); };
         try { video.currentTime = mirrored; } catch {}
         video.play().catch(() => {});
       }, { once: true });
